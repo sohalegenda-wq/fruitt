@@ -1,0 +1,86 @@
+name: Build Windows game
+on:
+  push:
+    branches: [main]
+    paths:
+      - downloads/FRUIT_MAYHEM_Source.zip
+      - .github/workflows/windows-build.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: fruit-windows-release
+  cancel-in-progress: false
+jobs:
+  windows-game:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GODOT_VERSION: 4.6.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install matching Godot and Windows export templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/godot"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/godot.zip" "https://github.com/godotengine/godot-builds/releases/download/4.6.3-stable/Godot_v4.6.3-stable_linux.x86_64.zip"
+          unzip -q "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot"
+          chmod +x "$RUNNER_TEMP/godot/Godot_v4.6.3-stable_linux.x86_64"
+          echo "$RUNNER_TEMP/godot" >> "$GITHUB_PATH"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/templates.tpz" "https://github.com/godotengine/godot-builds/releases/download/4.6.3-stable/Godot_v4.6.3-stable_export_templates.tpz"
+          template_dir="$HOME/.local/share/godot/export_templates/4.6.3.stable"
+          mkdir -p "$template_dir"
+          unzip -q -j "$RUNNER_TEMP/templates.tpz" 'templates/windows_release_x86_64.exe' 'templates/windows_release_x86_64_console.exe' 'templates/version.txt' -d "$template_dir"
+          rm "$RUNNER_TEMP/templates.tpz"
+      - name: Unpack project and import assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -q downloads/FRUIT_MAYHEM_Source.zip -d build
+          mkdir -p build/fruit-mayhem/exports dist/FRUIT_MAYHEM_Windows/qa
+          Godot_v4.6.3-stable_linux.x86_64 --headless --path build/fruit-mayhem --editor --import --quit
+      - name: Test actual game scene
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 120s Godot_v4.6.3-stable_linux.x86_64 --headless --path build/fruit-mayhem -- --smoke-test 2>&1 | tee dist/FRUIT_MAYHEM_Windows/qa/source-test.log
+          grep -q 'TEST: PASS' dist/FRUIT_MAYHEM_Windows/qa/source-test.log
+          if grep -Eq 'SCRIPT ERROR:|^ERROR:' dist/FRUIT_MAYHEM_Windows/qa/source-test.log; then exit 1; fi
+      - name: Export Windows x64 with embedded resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          Godot_v4.6.3-stable_linux.x86_64 --headless --path build/fruit-mayhem --export-release "Windows Desktop" 2>&1 | tee dist/FRUIT_MAYHEM_Windows/qa/windows-export.log
+          test -s build/fruit-mayhem/exports/FRUIT_MAYHEM.exe
+          file build/fruit-mayhem/exports/FRUIT_MAYHEM.exe | grep -q 'PE32+'
+      - name: Test the embedded resource pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 120s Godot_v4.6.3-stable_linux.x86_64 --headless --main-pack build/fruit-mayhem/exports/FRUIT_MAYHEM.exe -- --smoke-test 2>&1 | tee dist/FRUIT_MAYHEM_Windows/qa/exported-pack-test.log
+          grep -q 'TEST: PASS' dist/FRUIT_MAYHEM_Windows/qa/exported-pack-test.log
+          if grep -Eq 'SCRIPT ERROR:|^ERROR:' dist/FRUIT_MAYHEM_Windows/qa/exported-pack-test.log; then exit 1; fi
+      - name: Package playable game
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp build/fruit-mayhem/exports/FRUIT_MAYHEM.exe dist/FRUIT_MAYHEM_Windows/
+          cp build/fruit-mayhem/{README.md,QA_REPORT.md,LICENSES.md,GODOT_LICENSE.txt,GODOT_COPYRIGHT.txt} dist/FRUIT_MAYHEM_Windows/
+          printf 'Extract this ZIP, then open FRUIT_MAYHEM.exe. Click PLAY. WASD move, mouse look, Q spawn, Tab tools, F grab, T slow motion, X X-Ray, Esc pause.\n' > dist/FRUIT_MAYHEM_Windows/START_HERE.txt
+          (cd dist && zip -q -r FRUIT_MAYHEM_Windows.zip FRUIT_MAYHEM_Windows)
+          cp downloads/FRUIT_MAYHEM_Source.zip dist/
+          (cd dist && sha256sum FRUIT_MAYHEM_Windows.zip FRUIT_MAYHEM_Source.zip > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FRUIT_MAYHEM_Windows
+          path: dist/FRUIT_MAYHEM_Windows.zip
+      - name: Publish downloadable game in Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v0.1.0-build-${{ github.run_number }}"
+          printf '%s\n' 'Первая играбельная версия: 10 фруктов, 3 карты, 8 устройств, физика, X-Ray и сохранения.' '' 'Скачайте FRUIT_MAYHEM_Windows.zip, извлеките архив и запустите FRUIT_MAYHEM.exe. Godot устанавливать не нужно.' '' 'Проверены исходный проект и встроенный пакет ресурсов под Linux. Запуск EXE на Windows и FPS на Intel UHD ещё не проверены. Подробности и ограничения — в README.md и QA_REPORT.md внутри архива.' > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$tag" dist/FRUIT_MAYHEM_Windows.zip dist/FRUIT_MAYHEM_Source.zip dist/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "FRUIT MAYHEM 3D — Windows / First Playable" --notes-file "$RUNNER_TEMP/release-notes.md"
